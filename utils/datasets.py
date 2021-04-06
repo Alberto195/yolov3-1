@@ -12,11 +12,12 @@ from multiprocessing.pool import ThreadPool
 from pathlib import Path
 from threading import Thread
 
-import cv2
+import cv2.cv2 as cv2
 import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image, ExifTags
+from skimage.feature import hog, local_binary_pattern
 from torch.utils.data import Dataset
 from tqdm import tqdm
 
@@ -28,6 +29,10 @@ help_url = 'https://github.com/ultralytics/yolov3/wiki/Train-Custom-Data'
 img_formats = ['bmp', 'jpg', 'jpeg', 'png', 'tif', 'tiff', 'dng']  # acceptable image suffixes
 vid_formats = ['mov', 'avi', 'mp4', 'mpg', 'mpeg', 'm4v', 'wmv', 'mkv']  # acceptable video suffixes
 logger = logging.getLogger(__name__)
+
+width, height = 960, 576
+step_width, step_height = 32, 16
+lbp_hog = False
 
 # Get orientation exif tag
 for orientation in ExifTags.TAGS.keys():
@@ -608,11 +613,59 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
 
 # Ancillary functions --------------------------------------------------------------------------------------------------
 def load_image(self, index):
+
+    def getHOG(img_or):
+        resized = cv2.resize(img_or, (width, height), interpolation=cv2.INTER_LINEAR)
+
+        fd, imghg = hog(resized, orientations=9, pixels_per_cell=(8, 8),
+                        cells_per_block=(2, 2), feature_vector=True, visualize=True)
+
+        return fd, imghg
+
+    def getLBP(img_or):
+        resized = cv2.resize(img_or, (width, height), interpolation=cv2.INTER_LINEAR)
+        METHOD = 'nri_uniform'
+        radius = 1
+        n_points = 8 * radius
+
+        op = []
+
+        for i in range(0, width, step_width):
+            hists = []
+            for j in range(0, height, step_height):
+                lbp = local_binary_pattern(resized[j:j + step_height, i:i + step_width], n_points, radius, METHOD)
+                hists.extend(lbp)
+            op.append(hists)
+
+        return np.array(op)
+
+
     # loads 1 image from dataset, returns img, original hw, resized hw
     img = self.imgs[index]
     if img is None:  # not cached
         path = self.img_files[index]
-        img = cv2.imread(path)  # BGR
+
+        if lbp_hog:
+            img = cv2.imread(path, 0)  # BGR
+
+            # LBP, HOG manipulation
+            dataLBP = getLBP(img)
+            nuls = np.zeros((height, width))
+            for i in range(int(width / step_width)):
+                for j in range(0, height):
+                    for k in range(step_width):
+                        nuls[j][k + i * step_width] = dataLBP[i][j][k]
+
+            nuls = np.array(nuls)
+            dataHOG, ingHOG = getHOG(img)
+            ingHOG = (ingHOG / ingHOG.max() * 255).astype('uint8')
+            nuls = nuls.astype('uint8')
+            img_or = img.astype('uint8')
+            img = np.dstack((ingHOG, nuls, img_or))
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        else:
+            img = cv2.imread(path)  # BGR
+
         assert img is not None, 'Image Not Found ' + path
         h0, w0 = img.shape[:2]  # orig hw
         r = self.img_size / max(h0, w0)  # resize image to img_size
